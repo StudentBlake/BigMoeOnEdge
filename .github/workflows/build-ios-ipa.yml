@@ -1,0 +1,92 @@
+name: Build Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-latest
+
+    env:
+      BUILD_DIR: build-ios-device
+      BUILD_TYPE: Release
+      IOS_MIN_VERSION: "16.4"
+      BMOE_IOS_APP_BUNDLE_ID: io.bigmoeonedge.app
+      BMOE_IOS_BUNDLE_ID: io.bigmoeonedge.harness
+      BMOE_IOS_MEMORY_ENTITLEMENTS: "OFF"
+      BMOE_IOS_EXTENDED_ADDRESSING: "OFF"
+
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode and verify toolchain
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Selecting $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphoneos --show-sdk-path
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          cmake --version
+
+      - name: Run BmoeKit tests
+        run: swift test --package-path examples/ios/BmoeKit
+
+      - name: Configure iOS device Xcode project (unsigned)
+        run: |
+          cmake -S . -B "${{ env.BUILD_DIR }}" -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ env.IOS_MIN_VERSION }}" \
+            -DBMOE_BACKEND_MODULES=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBMOE_BUILD_TESTS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DBMOE_IOS_BUNDLE_ID="${{ env.BMOE_IOS_BUNDLE_ID }}" \
+            -DBMOE_IOS_APP_BUNDLE_ID="${{ env.BMOE_IOS_APP_BUNDLE_ID }}" \
+            -DBMOE_IOS_MEMORY_ENTITLEMENTS="${{ env.BMOE_IOS_MEMORY_ENTITLEMENTS }}" \
+            -DBMOE_IOS_EXTENDED_ADDRESSING="${{ env.BMOE_IOS_EXTENDED_ADDRESSING }}" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=""
+
+      - name: Build bmoe-app (unsigned, Release, iphoneos)
+        run: |
+          cmake --build "${{ env.BUILD_DIR }}" \
+            --config "${{ env.BUILD_TYPE }}" \
+            --target bmoe-app -- \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find "${{ env.BUILD_DIR }}" -maxdepth 4 -name "BigMoeOnEdge.app" -type d | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find BigMoeOnEdge.app in ${{ env.BUILD_DIR }}"
+            exit 1
+          fi
+
+          echo "Found app bundle: $APP_PATH"
+          rm -rf build-ipa
+          mkdir -p build-ipa/Payload
+          cp -R "$APP_PATH" build-ipa/Payload/
+          (cd build-ipa && zip -qry BigMoeOnEdge-unsigned.ipa Payload)
+          ls -lh build-ipa/BigMoeOnEdge-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BigMoeOnEdge-unsigned-ipa
+          path: build-ipa/BigMoeOnEdge-unsigned.ipa
